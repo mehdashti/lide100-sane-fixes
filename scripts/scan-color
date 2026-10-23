@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Colour scan with the Canon LiDE 100 through the patched backend (lide100-env).
+#
+# Asks for the resolution, saves a JPEG to ~/Pictures/Scans and opens it.
+# Environment: SCAN_RESOLUTION (skips the question), SCAN_OUTDIR,
+# LIDE100_LANG=fa for Persian messages (default: from LANG).
+# Extra arguments go to scanimage, e.g. "-t 120 -y 30" to scan a strip.
+set -euo pipefail
+
+resolution=${SCAN_RESOLUTION:-}
+outdir=${SCAN_OUTDIR:-"$(xdg-user-dir PICTURES 2>/dev/null || echo "$HOME/Pictures")/Scans"}
+out="$outdir/scan-$(date +%Y-%m-%d_%H-%M-%S).jpg"
+lang=${LIDE100_LANG:-${LANG%%_*}}
+
+if [[ $lang == fa ]]; then
+    t_app="اسکن رنگی"
+    t_busy="اسکن در حال انجام است"; t_busy_body="صبر کنید تا اسکن قبلی تمام شود."
+    t_missing="اسکنر پیدا نشد"; t_missing_body="کابل USB اسکنر را بررسی کنید و دوباره امتحان کنید."
+    t_ask="رزولوشن اسکن را انتخاب کنید:"; t_use="مناسب برای"
+    t_150="پیش‌نمایش و فایل کوچک"; t_300="مدرک، کارت و نامه"
+    t_600="عکس و جزئیات ریز"; t_1200="بزرگ‌نمایی عکس کوچک (کند)"
+    t_start="اسکن شروع شد"; t_start_body="رزولوشن %s dpi. در رزولوشن بالا چند دقیقه طول می‌کشد."
+    t_failed="اسکن انجام نشد"; t_done="اسکن تمام شد"
+else
+    t_app="Colour scan"
+    t_busy="A scan is already running"; t_busy_body="Wait for the current scan to finish."
+    t_missing="Scanner not found"; t_missing_body="Check the scanner's USB cable and try again."
+    t_ask="Choose the scan resolution:"; t_use="Good for"
+    t_150="Preview, small file"; t_300="Documents, cards, letters"
+    t_600="Photos, fine detail"; t_1200="Enlarging small photos (slow)"
+    t_start="Scan started"; t_start_body="%s dpi. High resolutions take a few minutes."
+    t_failed="Scan failed"; t_done="Scan finished"
+fi
+
+notify() { notify-send -a "$t_app" -i scanner "$@" || true; }
+scanimage() { lide100-env scanimage "$@"; }
+PATH="$(dirname "$(readlink -f "$0")"):$PATH"
+
+# One scan at a time; a second click while scanning only says so.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/scan-color.lock"
+if ! flock -n 9; then
+    notify "$t_busy" "$t_busy_body"
+    exit 1
+fi
+
+# Ask for the resolution unless it was given; without a desktop, use 300.
+if [[ -z $resolution ]]; then
+    if [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] && command -v zenity >/dev/null; then
+        resolution=$(zenity --list --radiolist --title="$t_app" \
+            --text="$t_ask" --width=440 --height=330 \
+            --column="" --column="dpi" --column="$t_use" \
+            FALSE 150 "$t_150" TRUE 300 "$t_300" FALSE 600 "$t_600" FALSE 1200 "$t_1200" \
+            --print-column=2 2>/dev/null) || exit 0
+        [[ -n $resolution ]] || exit 0
+    else
+        resolution=300
+    fi
+fi
+
+# The USB address changes on every replug, so look the scanner up each time.
+device=$(scanimage -f '%d%n' 2>/dev/null | grep -m1 '^genesys:' || true)
+if [[ -z $device ]]; then
+    notify -u critical "$t_missing" "$t_missing_body"
+    exit 1
+fi
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+mkdir -p "$outdir"
+# shellcheck disable=SC2059
+notify "$t_start" "$(printf "$t_start_body" "$resolution")"
+
+if ! scanimage -d "$device" --mode Color --resolution "$resolution" \
+        --format=pnm "$@" >"$tmpdir/scan.pnm" 2>"$tmpdir/err"; then
+    notify -u critical "$t_failed" "$(tail -n 3 "$tmpdir/err")"
+    exit 1
+fi
+
+magick "$tmpdir/scan.pnm" -quality 92 "$out"
+
+notify "$t_done" "$out"
+xdg-open "$out" >/dev/null 2>&1 &
+echo "$out"

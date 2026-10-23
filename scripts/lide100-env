@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Run a SANE program with the patched genesys backend built by build.sh.
+#   lide100-env simple-scan
+#   lide100-env scanimage -L
+# LIDE100_SANE_PREFIX overrides where the backend was installed.
+prefix=${LIDE100_SANE_PREFIX:-$HOME/.local/lib/sane-lide100}
+export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export SANE_CONFIG_DIR="$prefix/etc/sane.d"
+exec "$@"

@@ -1,0 +1,147 @@
+From 32f1324ff121ea61b98f7716f33f77f9a0360f80 Mon Sep 17 00:00:00 2001
+From: mehdashti <mehdashti@gmail.com>
+Date: Fri, 23 Oct 2026 11:07:36 +0300
+Subject: [PATCH 3/4] genesys: LiDE 100 white strip correction profile
+
+The internal white strip of an older LiDE 100 can yellow unevenly. Shading
+computed from it then boosts blue by 20-30% in the yellowed columns, which shows
+as blue tinted bands (or, before the gamma fix, as yellow stripes).
+
+Read an optional per-column profile from ~/.sane/canon-lide-100-strip-profile.txt
+(or $LIDE100_STRIP_PROFILE) and correct the white average with it while the
+shading coefficients are computed. The profile is made once by calibrating on
+white paper; LIDE100_CALIB_Y and LIDE100_CALIB_MM move the shading scan there.
+---
+ backend/genesys/genesys.cpp | 81 +++++++++++++++++++++++++++++++++++++
+ backend/genesys/gl847.cpp   |  9 +++++
+ 2 files changed, 90 insertions(+)
+
+diff --git a/backend/genesys/genesys.cpp b/backend/genesys/genesys.cpp
+index 766016c..6193ed3 100644
+--- a/backend/genesys/genesys.cpp
++++ b/backend/genesys/genesys.cpp
+@@ -51,6 +51,7 @@
+ #include "test_settings.h"
+ #include "../include/sane/sanei_config.h"
+ 
++#include <algorithm>
+ #include <array>
+ #include <cmath>
+ #include <cstring>
+@@ -3194,6 +3195,84 @@ static void compute_shifted_coefficients(Genesys_Device * dev,
+   }
+ }
+ 
++namespace {
++
++// The LiDE 100's internal white calibration strip yellows with age, unevenly
++// across its width. Shading computed from it then over-amplifies blue in the
++// yellowed columns. A per-column profile, measured once against white paper on
++// the glass (lide100-strip-profile.py), corrects the strip reading before the
++// coefficients are computed.
++// Format: pixel count N, then N lines of "red green blue" factors.
++std::vector<float> load_lide100_strip_profile()
++{
++    std::string path;
++    if (const char* env = std::getenv("LIDE100_STRIP_PROFILE")) {
++        path = env;
++    } else if (const char* home = std::getenv("HOME")) {
++        path = std::string(home) + "/.sane/canon-lide-100-strip-profile.txt";
++    } else {
++        return {};
++    }
++    std::ifstream in(path);
++    std::size_t count = 0;
++    if (!(in >> count) || count == 0 || count > 100000) {
++        return {};
++    }
++    std::vector<float> profile(count * 3);
++    for (auto& k : profile) {
++        if (!(in >> k) || k < 0.5f || k > 2.0f) {
++            return {};
++        }
++    }
++    return profile;
++}
++
++// Applies the strip profile to white_average_data (planar, as the LiDE 100
++// coefficient code reads it) and puts the measured data back when done, so
++// the calibration cache keeps the uncorrected values.
++class StripProfileCorrection
++{
++public:
++    StripProfileCorrection(Genesys_Device* dev, unsigned channels) : dev_{dev}
++    {
++        if (dev->model->model_id != ModelId::CANON_LIDE_100 || channels != 3) {
++            return;
++        }
++        auto& white = dev->white_average_data;
++        const auto& dark = dev->dark_average_data;
++        auto profile = load_lide100_strip_profile();
++        if (profile.empty() || white.size() % 3 != 0 || dark.size() != white.size()) {
++            return;
++        }
++        saved_ = white;
++        std::size_t pixels = white.size() / 3;
++        std::size_t count = profile.size() / 3;
++        for (std::size_t x = 0; x < pixels; ++x) {
++            std::size_t p = x * count / pixels;
++            for (unsigned c = 0; c < 3; ++c) {
++                std::size_t i = c * pixels + x;
++                float lit = static_cast<float>(white[i]) - static_cast<float>(dark[i]);
++                float corrected = static_cast<float>(dark[i]) + lit * profile[p * 3 + c];
++                white[i] = static_cast<std::uint16_t>(std::clamp(corrected, 0.0f, 65535.0f));
++            }
++        }
++        DBG(DBG_info, "%s: applied white strip profile (%zu entries)\n", __func__, count);
++    }
++
++    ~StripProfileCorrection()
++    {
++        if (!saved_.empty()) {
++            dev_->white_average_data = std::move(saved_);
++        }
++    }
++
++private:
++    Genesys_Device* dev_;
++    std::vector<std::uint16_t> saved_;
++};
++
++} // namespace
++
+ static void genesys_send_shading_coefficient(Genesys_Device* dev, const Genesys_Sensor& sensor)
+ {
+     DBG_HELPER(dbg);
+@@ -3223,6 +3302,8 @@ static void genesys_send_shading_coefficient(Genesys_Device* dev, const Genesys_
+ 
+     unsigned channels = dev->calib_session.params.channels;
+ 
++    StripProfileCorrection strip_profile_correction(dev, channels);
++
+   /* we always build data for three channels, even for gray
+    * we make the shading data such that each color channel data line is contiguous
+    * to the next one, which allow to write the 3 channels in 1 write
+diff --git a/backend/genesys/gl847.cpp b/backend/genesys/gl847.cpp
+index f826bf4..c2b33b2 100644
+--- a/backend/genesys/gl847.cpp
++++ b/backend/genesys/gl847.cpp
+@@ -852,6 +852,15 @@ void CommandSetGl847::init_regs_for_shading(Genesys_Device* dev, const Genesys_S
+         move = dev->model->y_offset_calib_white;
+     }
+ 
++    // Used by lide100-strip-profile.py to take the shading data from white paper on the
++    // glass instead of the internal strip: position from home and length, in mm.
++    if (const char* e = std::getenv("LIDE100_CALIB_Y")) {
++        move = static_cast<float>(std::atof(e));
++    }
++    if (const char* e = std::getenv("LIDE100_CALIB_MM")) {
++        calib_size_mm = static_cast<float>(std::atof(e));
++    }
++
+     move = static_cast<float>((move * move_dpi) / MM_PER_INCH);
+ 
+     unsigned calib_lines = static_cast<unsigned>(calib_size_mm * resolution / MM_PER_INCH);
+-- 
+2.53.0
+

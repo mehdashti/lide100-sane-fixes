@@ -1,0 +1,41 @@
+From 1b589e089023f507478c38c482c9b80445e80519 Mon Sep 17 00:00:00 2001
+From: mehdashti <mehdashti@gmail.com>
+Date: Fri, 23 Oct 2026 11:07:36 +0300
+Subject: [PATCH 1/4] genesys: send full scale as the last gamma table entry
+
+sanei_genesys_send_gamma_table() forced the last entry of each gamma table to 0.
+That entry is the output for the top of the input range, so every pixel whose
+channel reached full scale came out black in that channel. On a Canon LiDE 100
+this produced yellow vertical stripes (blue at full scale) and red, yellow and
+magenta speckles along bright edges such as the rim of a plastic card. 16-bit
+scans were unaffected because they bypass the gamma table.
+
+Send 0xffff instead, as the old FIXME already suspected.
+---
+ backend/genesys/low.cpp | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/backend/genesys/low.cpp b/backend/genesys/low.cpp
+index 3ffc24a..7906351 100644
+--- a/backend/genesys/low.cpp
++++ b/backend/genesys/low.cpp
+@@ -741,11 +741,11 @@ void sanei_genesys_send_gamma_table(Genesys_Device* dev, const Genesys_Sensor& s
+       val &= ~(0x01 << i);
+         dev->interface->write_register(0xbe, val);
+ 
+-      // FIXME: currently the last word of each gamma table is not initialized, so to work around
+-      // unstable data, just set it to 0 which is the most likely value of uninitialized memory
+-      // (proper value is probably 0xff)
+-      gamma[size * 2 * i + size * 2 - 2] = 0;
+-      gamma[size * 2 * i + size * 2 - 1] = 0;
++      // The last word is the output for the top of the input range. Setting it to 0 turns any
++      // channel that reaches full scale black: on the Canon LiDE 100 that showed up as yellow
++      // vertical stripes and as red/yellow/magenta speckles along bright edges. Use full scale.
++      gamma[size * 2 * i + size * 2 - 2] = 0xff;
++      gamma[size * 2 * i + size * 2 - 1] = 0xff;
+ 
+       /* set GMM_Z */
+         dev->interface->write_register(0xc5+2*i, gamma[size*2*i+1]);
+-- 
+2.53.0
+

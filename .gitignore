@@ -1,0 +1,16 @@
+# Never commit captures, scans, VM disks or personal calibration data:
+# USB captures and debug images contain fragments of whatever was scanned.
+*.pcap
+*.pcapng
+*.qcow2
+*.img
+*.fd
+*.pnm
+*.tiff
+*.jpg
+*.png
+*.pdf
+esp-copy/
+captures/
+canon-lide-100-strip-profile.txt
+__pycache__/

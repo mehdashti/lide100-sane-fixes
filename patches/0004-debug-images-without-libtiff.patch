@@ -1,0 +1,62 @@
+From 9795bcc6f18dc714deee3b8cc7f49120da229e0c Mon Sep 17 00:00:00 2001
+From: mehdashti <mehdashti@gmail.com>
+Date: Fri, 23 Oct 2026 11:07:36 +0300
+Subject: [PATCH 4/4] genesys: save debug images as PNM when built without
+ libtiff
+
+SANE_DEBUG_GENESYS_IMAGE=1 only wrote images when libtiff was available.
+Fall back to PNM so calibration data can be inspected (and the LiDE 100 strip
+profile made) on systems without the libtiff headers.
+---
+ backend/genesys/image.cpp | 28 ++++++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/backend/genesys/image.cpp b/backend/genesys/image.cpp
+index 431f996..d745f57 100644
+--- a/backend/genesys/image.cpp
++++ b/backend/genesys/image.cpp
+@@ -27,6 +27,7 @@
+ #endif
+ 
+ #include <array>
++#include <cstdio>
+ 
+ namespace genesys {
+ 
+@@ -216,8 +217,31 @@ void write_tiff_file(const std::string& filename, const void* data, int depth, i
+     TIFFClose(image);
+ 
+ #else
+-    dbg.log(DBG_error, "Backend has been built without TIFF library support. "
+-            "Debug images will not be saved");
++    // Without libtiff, save 8/16-bit images as PNM next to the requested name.
++    if (depth != 8 && depth != 16) {
++        dbg.log(DBG_error, "Backend has been built without TIFF library support. "
++                "Debug images will not be saved");
++        return;
++    }
++    std::FILE* out = std::fopen((filename + ".pnm").c_str(), "wb");
++    if (!out) {
++        dbg.log(DBG_error, "Could not save debug image");
++        return;
++    }
++    std::fprintf(out, "P%d\n%d %d\n%d\n", channels > 1 ? 6 : 5, pixels_per_line, lines,
++                 depth == 16 ? 65535 : 255);
++    std::size_t samples = static_cast<std::size_t>(pixels_per_line) * channels * lines;
++    const auto* bytes = reinterpret_cast<const std::uint8_t*>(data);
++    if (depth == 8) {
++        std::fwrite(bytes, 1, samples, out);
++    } else {
++        // PNM stores 16-bit samples big-endian
++        for (std::size_t i = 0; i < samples; ++i) {
++            std::fputc(bytes[2 * i + 1], out);
++            std::fputc(bytes[2 * i], out);
++        }
++    }
++    std::fclose(out);
+ #endif
+ }
+ 
+-- 
+2.53.0
+

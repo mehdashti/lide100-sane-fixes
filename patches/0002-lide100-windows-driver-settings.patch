@@ -1,0 +1,108 @@
+From bc987dc45fbb473810bd2f0e44296bd0f53cd4d5 Mon Sep 17 00:00:00 2001
+From: mehdashti <mehdashti@gmail.com>
+Date: Fri, 23 Oct 2026 11:07:36 +0300
+Subject: [PATCH 2/4] genesys: match the Canon Windows driver's LiDE 100
+ settings
+
+Values taken from a USB capture of the Canon Windows driver on a LiDE 100:
+
+- LED calibration targets of about 39k/53k/50k (R/G/B) instead of ~30k, which
+  reproduces the driver's exposures (449/397/345) with the same AFE settings;
+- pixel averaging (AVEENB) when reducing to the output resolution;
+- gamma input levels 400..58000 (57500 for blue), which the driver applies on
+  top of a 2.2 curve. Without them white paper comes out as a dull light grey.
+---
+ backend/genesys/genesys.cpp | 11 +++++++++++
+ backend/genesys/gl847.cpp   |  8 +++++++-
+ backend/genesys/low.cpp     | 27 +++++++++++++++++++++++++++
+ 3 files changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/backend/genesys/genesys.cpp b/backend/genesys/genesys.cpp
+index 74ef74e..766016c 100644
+--- a/backend/genesys/genesys.cpp
++++ b/backend/genesys/genesys.cpp
+@@ -2032,6 +2032,17 @@ SensorExposure scanner_led_calibration(Genesys_Device& dev, const Genesys_Sensor
+         top[0] = 41000;
+         top[1] = 51000;
+         top[2] = 51000;
++    } else if (dev.model->model_id == ModelId::CANON_LIDE_100) {
++        // The Canon Windows driver drives the LEDs harder on this scanner: with the same
++        // AFE settings its exposures put the white strip at about 39k/53k/50k (R/G/B)
++        // instead of the generic GL847 target of ~30k, for a better signal-to-noise ratio.
++        bottom[0] = 37000;
++        bottom[1] = 51000;
++        bottom[2] = 48000;
++
++        top[0] = 41000;
++        top[1] = 55000;
++        top[2] = 52000;
+     } else if (dev.model->asic_type == AsicType::GL847) {
+         bottom[0] = 28000;
+         bottom[1] = 28000;
+diff --git a/backend/genesys/gl847.cpp b/backend/genesys/gl847.cpp
+index 14d1fd0..f826bf4 100644
+--- a/backend/genesys/gl847.cpp
++++ b/backend/genesys/gl847.cpp
+@@ -481,7 +481,13 @@ static void gl847_init_optical_regs_scan(Genesys_Device* dev, const Genesys_Sens
+     } else {
+         reg->find_reg(REG_0x01).value |= REG_0x01_DVDSET;
+     }
+-    reg->find_reg(REG_0x03).value &= ~REG_0x03_AVEENB;
++    // The Canon Windows driver averages sensor pixels down to the output
++    // resolution on the LiDE 100 instead of dropping them, which lowers noise.
++    if (dev->model->model_id == ModelId::CANON_LIDE_100) {
++        reg->find_reg(REG_0x03).value |= REG_0x03_AVEENB;
++    } else {
++        reg->find_reg(REG_0x03).value &= ~REG_0x03_AVEENB;
++    }
+ 
+     reg->find_reg(REG_0x03).value &= ~REG_0x03_XPASEL;
+     if (has_flag(session.params.flags, ScanFlag::USE_XPA)) {
+diff --git a/backend/genesys/low.cpp b/backend/genesys/low.cpp
+index 7906351..c32d89b 100644
+--- a/backend/genesys/low.cpp
++++ b/backend/genesys/low.cpp
+@@ -43,6 +43,7 @@
+ #include "gl847.h"
+ #include "gl646.h"
+ 
++#include <algorithm>
+ #include <cstdio>
+ #include <chrono>
+ #include <cmath>
+@@ -729,6 +730,32 @@ void sanei_genesys_send_gamma_table(Genesys_Device* dev, const Genesys_Sensor& s
+ 
+     auto gamma = generate_gamma_buffer(dev, sensor, 16, 65535, size);
+ 
++    if (dev->model->model_id == ModelId::CANON_LIDE_100) {
++        // The Canon Windows driver's tables for this scanner are the usual 2.2 curve
++        // stretched over input levels 400..58000 (57500 for blue) rather than 0..65535,
++        // which puts white paper near full white instead of a dull light grey. Apply the
++        // same input levels on top of whatever curve the user selected.
++        const float black = 400.0f;
++        const float white[3] = { 58000.0f, 58000.0f, 57500.0f };
++        std::vector<std::uint8_t> stretched(gamma.size());
++        for (int c = 0; c < 3; c++) {
++            auto value = [&](int i) {
++                return gamma[size * 2 * c + i * 2] | (gamma[size * 2 * c + i * 2 + 1] << 8);
++            };
++            for (int i = 0; i < size; i++) {
++                float t = (i * 256.0f - black) / (white[c] - black);
++                float src = std::min(std::max(t, 0.0f), 1.0f) * (size - 1);
++                int lo = static_cast<int>(src);
++                int hi = std::min(lo + 1, size - 1);
++                float v = value(lo) + (value(hi) - value(lo)) * (src - lo);
++                auto out = static_cast<std::uint16_t>(std::min(v + 0.5f, 65535.0f));
++                stretched[size * 2 * c + i * 2] = out & 0xff;
++                stretched[size * 2 * c + i * 2 + 1] = out >> 8;
++            }
++        }
++        gamma = std::move(stretched);
++    }
++
+     // loop sending gamma tables NOTE: 0x01000000 not 0x10000000
+     for (i = 0; i < 3; i++) {
+         // clear corresponding GMM_N bit
+-- 
+2.53.0
+
