@@ -66,6 +66,7 @@ def calibrate(workdir, extra_env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", default=os.path.expanduser("~/.sane/canon-lide-100-strip-profile.txt"))
+    parser.add_argument("--force", action="store_true", help="save even if the paper looks uneven")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as strip_dir, tempfile.TemporaryDirectory() as paper_dir:
@@ -82,13 +83,31 @@ def main():
             sys.exit(f"Calibration widths differ ({width} vs {pw}); nothing written.")
 
         ratio = [[0.0] * width for _ in range(3)]
+        uneven, green = set(), [0.0] * width
         for c in range(3):
             for x in range(width):
                 # median over the paper lines, so dust specks don't count
-                paper = statistics.median(paper_white(c, x, y) for y in range(lines))
+                values = [paper_white(c, x, y) for y in range(lines)]
+                paper = statistics.median(values)
                 lit_paper = paper - paper_dark(c, x)
                 lit_strip = strip_white(c, x) - strip_dark(c, x)
                 ratio[c][x] = lit_paper / lit_strip if lit_strip > 1000 and lit_paper > 1000 else 1.0
+                if c == 1:
+                    green[x] = lit_paper
+                    # print or an object on the paper darkens many lines, a speck only a few
+                    if sum(v < 0.8 * paper for v in values) > lines // 10:
+                        uneven.add(x)
+
+        # ...and something covering most of the lines pulls the whole column down
+        inner = range(width // 20, width * 19 // 20)
+        typical = statistics.median(green[x] for x in inner)
+        uneven = sorted(x for x in inner if x in uneven or green[x] < 0.85 * typical)
+        if len(uneven) > width // 100 and not args.force:
+            mm = [round(x * 25.4 / 600) for x in (uneven[0], uneven[-1])]
+            sys.exit(f"The paper is not evenly white about {mm[0]}-{mm[1]} mm from the left edge, "
+                     f"{PAPER_Y_MM - 8}-{PAPER_Y_MM + PAPER_MM - 8} mm from the top of the glass. "
+                     "Use a clean, plain white sheet with nothing else on the glass and run again "
+                     "(--force saves anyway). Nothing written.")
 
         profile = [[1.0] * width for _ in range(3)]
         for c in range(3):

@@ -47,8 +47,9 @@ Tested on Debian (sid) with sane-backends 1.4.0. The patched backend goes into
    scripts/install.sh
    ```
 
-4. Put a **clean, plain white A4 sheet** on the glass, close the lid, and make the
-   white strip profile for your scanner (takes about 1.5 minutes):
+4. Put a **clean, plain white A4 sheet** flat on the glass with nothing else under or
+   beside it, close the lid, and make the white strip profile for your scanner (takes
+   about 1.5 minutes). The tool refuses to save if the paper looks uneven:
 
    ```bash
    lide100-strip-profile.py
